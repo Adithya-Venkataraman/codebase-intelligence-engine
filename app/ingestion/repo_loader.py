@@ -1,51 +1,86 @@
+"""
+Repository acquisition: parse GitHub URLs, clone/update repositories, and
+provide a single `prepare_repo` entry point that guarantees a local, up to
+date checkout for downstream processing.
+"""
+
+from __future__ import annotations
+
+import logging
 from pathlib import Path
 from urllib.parse import urlparse
-from git import Repo, repo
-BASE_REPO_DIR=Path("data/repos")
-repo_name="psf_requests"
+
+from git import GitCommandError, Repo
+
+logger = logging.getLogger(__name__)
+
+BASE_REPO_DIR = Path("data/repos")
+
+
 def get_repo_name(repo_url: str) -> str:
-    path=urlparse(repo_url).path.strip("/")
-    owner, repo = path.split("/")[:2]
+    """Derive a unique, filesystem-safe name from a GitHub URL.
+
+    e.g. https://github.com/psf/requests(.git) -> "psf_requests"
+    """
+    path = urlparse(repo_url).path.strip("/")
+    parts = path.split("/")
+    if len(parts) < 2:
+        raise ValueError(f"Not a valid GitHub repository URL: {repo_url!r}")
+
+    owner, repo = parts[0], parts[1]
     if repo.endswith(".git"):
-        repo=repo[:-4]
+        repo = repo[:-4]
     return f"{owner}_{repo}"
-print(get_repo_name("https://github.com/psf/response.git"))
-print(get_repo_name("https://github.com/psf/requests"))
-print(get_repo_name("https://github.com/Aditya/folder.git"))
+
 
 def repo_exists(repo_name: str) -> bool:
-    return (BASE_REPO_DIR/repo_name).exists()
-print(repo_exists("psf_requests"))
+    """Check whether a repository has already been cloned locally."""
+    return (BASE_REPO_DIR / repo_name).exists()
 
-def clone_repo(repo_name: str) -> Path:
-    repo_url="https://github.com/psf/requests.git"
-    repo_name=get_repo_name(repo_url)
-    repo_path=BASE_REPO_DIR/repo_name
-    repo=Repo.clone_from(repo_url, repo_path)
-    print(repo)
-    print(type(repo))
+
+def clone_repo(repo_url: str) -> Path:
+    """Clone `repo_url` into BASE_REPO_DIR and return the local path.
+
+    Raises RuntimeError if the clone fails.
+    """
+    repo_name = get_repo_name(repo_url)
+    repo_path = BASE_REPO_DIR / repo_name
+
+    BASE_REPO_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        Repo.clone_from(repo_url, repo_path)
+        logger.info("Cloned %s -> %s", repo_url, repo_path)
+    except GitCommandError as e:
+        raise RuntimeError(f"Failed to clone {repo_url}: {e}") from e
+
     return repo_path
-clone_repo(repo_name)
 
 
 def update_repo(repo_path: Path) -> bool:
+    """Pull the latest changes for an existing local repository."""
     try:
         repo = Repo(repo_path)
         repo.remotes.origin.pull()
+        logger.info("Updated %s", repo_path)
         return True
-
     except Exception as e:
-        print(f"Error updating repository: {e}")
+        logger.error("Error updating repository at %s: %s", repo_path, e)
         return False
 
-repo_path = Path("data/repos/psf_requests")
 
-print(update_repo(repo_path))
+def prepare_repo(repo_url: str) -> Path:
+    """Ensure a repository is cloned and up to date; return its local path.
 
-def prepare_repo(repo_url:str)->str:
-    repo_name=get_repo_name(repo_url)
+    This is the single entry point downstream stages (scanning, parsing,
+    indexing) should call.
+    """
+    repo_name = get_repo_name(repo_url)
+    repo_path = BASE_REPO_DIR / repo_name
+
     if repo_exists(repo_name):
-        update_repo(BASE_REPO_DIR/repo_name)
+        update_repo(repo_path)
     else:
-        clone_repo(repo_name)
-    return str(BASE_REPO_DIR/repo_name)
+        clone_repo(repo_url)
+
+    return repo_path
